@@ -1,0 +1,9 @@
+CREATE DATABASE IF NOT EXISTS question_db;
+USE question_db;
+
+CREATE TABLE IF NOT EXISTS questions (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  question TEXT,
+  answer TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
