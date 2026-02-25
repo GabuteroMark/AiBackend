@@ -6,6 +6,8 @@ const MAX_TEXT_CHARS = 3000;
 const TOTAL_QUESTIONS = 50;
 const BATCH_SIZE = 10;
 
+console.log("OPENROUTER KEY:", process.env.OPENROUTER_API_KEY);
+
 // Extract text
 async function extractTextFromPDF(buffer) {
   try {
