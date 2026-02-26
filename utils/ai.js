@@ -53,7 +53,7 @@ ${truncatedText}
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: "mistralai/mistral-7b-instruct",
+          model: "openai/gpt-4o-mini",
           messages: [{ role: "user", content: prompt }],
           temperature: 0.3,
           max_tokens: 2000
