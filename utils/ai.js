@@ -53,7 +53,7 @@ ${truncatedText}
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
-          model: "openai/gpt-4o-mini",
+          model: "stepfun/step-3.5-flash:free",
           messages: [{ role: "user", content: prompt }],
           temperature: 0.3,
           max_tokens: 2000
