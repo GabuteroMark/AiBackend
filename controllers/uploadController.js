@@ -13,10 +13,11 @@ async function submitTopicRequest(req, res, next) {
     const pdfFile = req.files.file;
     const accountId = Number(req.body.accountId);
     const gradeLevelId = Number(req.body.gradeLevelId);
+    const sectionId = Number(req.body.sectionId);
     const subjectId = Number(req.body.subjectId);
 
-    if (!accountId || !gradeLevelId || !subjectId)
-      return res.status(400).json({ error: "Account, Grade level, and Subject required" });
+    if (!accountId || !gradeLevelId || !sectionId || !subjectId)
+      return res.status(400).json({ error: "Account, Grade, Section, and Subject required" });
 
     const uploadDir = path.join(__dirname, "../uploads", "requests");
     if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
@@ -29,9 +30,9 @@ async function submitTopicRequest(req, res, next) {
 
     // Save request to DB
     const [result] = await pool.query(
-      `INSERT INTO topicrequests (accountId, gradeLevelId, subjectId, fileName, filePath, status, aiStatus, createdAt, updatedAt)
-       VALUES (?, ?, ?, ?, ?, 'Pending', 'Idle', NOW(), NOW())`,
-      [accountId, gradeLevelId, subjectId, fileName, filePath]
+      `INSERT INTO topicrequests (accountId, gradeLevelId, sectionId, subjectId, fileName, filePath, status, aiStatus, createdAt, updatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, 'Pending', 'Idle', NOW(), NOW())`,
+      [accountId, gradeLevelId, sectionId, subjectId, fileName, filePath]
     );
 
     res.json({
@@ -52,15 +53,25 @@ async function getTopicRequests(req, res, next) {
     const role = req.query.role; // 'Admin' or 'Teacher'
 
     let query = `
-      SELECT tr.*, gl.name as gradeLevelName, s.name as subjectName, a.firstName, a.lastName
+      SELECT tr.id, tr.accountId, tr.gradeLevelId, tr.sectionId, tr.subjectId, 
+             tr.fileName, tr.filePath, tr.status, tr.aiStatus, tr.remarks, tr.createdAt, tr.updatedAt,
+             gl.name as gradeLevelName, 
+             TRIM(gl.academicLevel) as academicLevel,
+             sec.name as sectionName,
+             s.name as subjectName, 
+             a.firstName, 
+             a.lastName,
+             gp.downloadUrl as generatedPdfUrl
       FROM topicrequests tr
       JOIN gradelevels gl ON tr.gradeLevelId = gl.id
+      JOIN sections sec ON tr.sectionId = sec.id
       JOIN subjects s ON tr.subjectId = s.id
       JOIN accounts a ON tr.accountId = a.id
+      LEFT JOIN generatedpdfs gp ON gp.requestId = tr.id
     `;
     let params = [];
 
-    if (role !== 'Admin' && accountId) {
+    if (role !== 'Admin' && role !== 'Coordinator' && accountId) {
       query += " WHERE tr.accountId = ?";
       params.push(accountId);
     }
@@ -90,18 +101,18 @@ async function approveAndGenerate(req, res, next) {
     // 2. Update status to Processing
     await pool.query("UPDATE topicrequests SET status = 'Approved', aiStatus = 'Processing', updatedAt = NOW() WHERE id = ?", [requestId]);
 
-    // 3. Perform AI Generation (reuse original logic)
+    // 3. Perform AI Generation
     const buffer = fs.readFileSync(tr.filePath);
     const text = await extractTextFromPDF(buffer);
 
     if (!text || text.trim().length === 0) {
-      await pool.query("UPDATE TopicRequests SET aiStatus = 'Failed', remarks = 'No readable text' WHERE id = ?", [requestId]);
+      await pool.query("UPDATE topicrequests SET aiStatus = 'Failed', remarks = 'No readable text' WHERE id = ?", [requestId]);
       return res.status(400).json({ error: "No readable text found in PDF" });
     }
 
     const questions = await generateQuestionsWithOpenRouter(text);
     if (!questions || !Array.isArray(questions) || questions.length === 0) {
-      await pool.query("UPDATE TopicRequests SET aiStatus = 'Failed', remarks = 'AI Generation Failed' WHERE id = ?", [requestId]);
+      await pool.query("UPDATE topicrequests SET aiStatus = 'Failed', remarks = 'AI Generation Failed' WHERE id = ?", [requestId]);
       return res.status(400).json({ error: "AI failed to generate questions" });
     }
 
@@ -109,9 +120,9 @@ async function approveAndGenerate(req, res, next) {
     for (let q of questions) {
       await pool.query(
         `INSERT INTO questions 
-         (gradeLevelId, subjectId, question, optionA, optionB, optionC, optionD, answer, createdAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
-        [tr.gradeLevelId, tr.subjectId, q.question, q.options?.A || "", q.options?.B || "", q.options?.C || "", q.options?.D || "", q.answer || ""]
+         (gradeLevelId, sectionId, subjectId, question, optionA, optionB, optionC, optionD, answer, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())`,
+        [tr.gradeLevelId, tr.sectionId, tr.subjectId, q.question, q.options?.A || "", q.options?.B || "", q.options?.C || "", q.options?.D || "", q.answer || ""]
       );
     }
 
@@ -135,16 +146,18 @@ async function approveAndGenerate(req, res, next) {
     const subjectDir = path.join(__dirname, "../generated", String(tr.subjectId));
     if (!fs.existsSync(subjectDir)) fs.mkdirSync(subjectDir, { recursive: true });
 
-    const pdfFileName = `Approved_Topic_${Date.now()}.pdf`;
+    const originalNameMatch = tr.fileName.match(/^\d+_(.+)$/);
+    const pdfFileName = originalNameMatch ? originalNameMatch[1] : tr.fileName;
+
     const pdfPathResult = path.join(subjectDir, pdfFileName);
     const pdfBytes = await pdfDoc.save();
     fs.writeFileSync(pdfPathResult, pdfBytes);
 
     // Save PDF record
     await pool.query(
-      `INSERT INTO generatedpdfs (subjectId, gradeLevelId, filePath, downloadUrl, createdAt)
-      VALUES (?, ?, ?, ?, NOW())`,
-      [tr.subjectId, tr.gradeLevelId, pdfPathResult, `/download/${tr.subjectId}/${pdfFileName}`]
+      `INSERT INTO generatedpdfs (requestId, subjectId, sectionId, gradeLevelId, filePath, downloadUrl, createdAt)
+      VALUES (?, ?, ?, ?, ?, ?, NOW())`,
+      [requestId, tr.subjectId, tr.sectionId, tr.gradeLevelId, pdfPathResult, `/download/${tr.subjectId}/${pdfFileName}`]
     );
 
     // Update Request to Completed
@@ -188,18 +201,35 @@ async function getGradeLevels(req, res) {
   }
 }
 
-// Get subjects by grade
-async function getSubjectsByGrade(req, res) {
+// Get sections by grade
+async function getSectionsByGradeLevel(req, res) {
   try {
-    const gradeId = Number(req.query.gradeLevelId);
-    if (!gradeId) return res.json([]);
+    const gradeLevelId = Number(req.query.gradeLevelId);
+    if (!gradeLevelId) return res.json([]);
 
     const [rows] = await pool.query(
-      `SELECT s.id, s.name, TRIM(gl.name) as gradeLevelName 
+      `SELECT id, name FROM sections WHERE gradeLevelId = ? ORDER BY id`,
+      [gradeLevelId]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to fetch sections" });
+  }
+}
+
+// Get subjects by section
+async function getSubjectsBySection(req, res) {
+  try {
+    const sectionId = Number(req.query.sectionId);
+    if (!sectionId) return res.json([]);
+
+    const [rows] = await pool.query(
+      `SELECT s.id, s.name, sec.name as sectionName 
        FROM subjects s 
-       JOIN gradelevels gl ON s.gradeLevelId = gl.id
-       WHERE s.gradeLevelId = ? AND s.subjectStatus = 'active'`,
-      [gradeId]
+       JOIN sections sec ON s.sectionId = sec.id
+       WHERE s.sectionId = ? AND s.subjectStatus = 'active'`,
+      [sectionId]
     );
     res.json(rows);
   } catch (err) {
@@ -225,7 +255,7 @@ async function getGeneratedPDFs(req, res) {
     // Transform file name for display
     const formattedRows = rows.map(r => ({
       ...r,
-      name: r.filePath.split("/").pop()
+      name: path.basename(r.filePath)
     }));
 
     res.json(formattedRows);
@@ -241,6 +271,7 @@ module.exports = {
   approveAndGenerate,
   rejectTopicRequest,
   getGradeLevels,
-  getSubjectsByGrade,
+  getSectionsByGradeLevel,
+  getSubjectsBySection,
   getGeneratedPDFs
 };
