@@ -155,9 +155,9 @@ async function approveAndGenerate(req, res, next) {
 
     // Save PDF record
     await pool.query(
-      `INSERT INTO generatedpdfs (requestId, subjectId, sectionId, gradeLevelId, filePath, downloadUrl, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?, NOW())`,
-      [requestId, tr.subjectId, tr.sectionId, tr.gradeLevelId, pdfPathResult, `/download/${tr.subjectId}/${pdfFileName}`]
+      `INSERT INTO generatedpdfs (requestId, subjectId, gradeLevelId, filePath, downloadUrl, createdAt)
+      VALUES (?, ?, ?, ?, ?, NOW())`,
+      [requestId, tr.subjectId, tr.gradeLevelId, pdfPathResult, `/download/${tr.subjectId}/${pdfFileName}`]
     );
 
     // Update Request to Completed
