@@ -79,6 +79,9 @@ async function getTopicRequests(req, res, next) {
     if (role !== 'Admin' && role !== 'Coordinator' && accountId) {
       query += " WHERE tr.accountId = ?";
       params.push(accountId);
+    } else if (role === 'Coordinator' && req.query.academicLevel) {
+      query += " WHERE gl.academicLevel = ?";
+      params.push(req.query.academicLevel);
     }
 
     query += " ORDER BY tr.createdAt DESC";
@@ -322,6 +325,76 @@ async function getGeneratedPDFs(req, res) {
   }
 }
 
+// Get list of files for a specific request
+async function getRequestFiles(req, res, next) {
+  try {
+    const requestId = Number(req.params.id);
+    console.log(`[DEBUG] Fetching files for request: ${requestId}`);
+    const [rows] = await pool.query("SELECT filePath, fileName FROM topicrequests WHERE id = ?", [requestId]);
+
+    if (rows.length === 0) {
+      console.warn(`[DEBUG] Request ${requestId} not found`);
+      return res.status(404).json({ error: "Request not found" });
+    }
+
+    const tr = rows[0];
+    const files = [];
+
+    if (!tr.filePath) {
+      console.warn(`[DEBUG] Request ${requestId} has no filePath`);
+      // Fallback for single file if name exists
+      if (tr.fileName && !tr.fileName.startsWith("Multiple Files")) {
+        files.push({ name: tr.fileName, url: `/download/requests/${tr.fileName}` });
+      }
+      return res.json(files);
+    }
+
+    // Check if it's a directory (multiple files)
+    if (fs.existsSync(tr.filePath)) {
+      const stats = fs.statSync(tr.filePath);
+      if (stats.isDirectory()) {
+        const dirFiles = fs.readdirSync(tr.filePath);
+        for (const file of dirFiles) {
+          if (file.toLowerCase().endsWith('.pdf')) {
+            // Compute URL
+            const normalizedPath = tr.filePath.replace(/\\/g, '/');
+            const token = 'uploads/requests';
+            const index = normalizedPath.toLowerCase().lastIndexOf(token);
+
+            let relativeDir = "";
+            if (index !== -1) {
+              relativeDir = normalizedPath.substring(index + token.length).replace(/^\/+/, '').replace(/\/+$/, '');
+            }
+
+            files.push({
+              name: file,
+              url: relativeDir ? `/download/requests/${relativeDir}/${file}` : `/download/requests/${file}`
+            });
+          }
+        }
+      } else {
+        // It's a single file
+        files.push({
+          name: tr.fileName || path.basename(tr.filePath),
+          url: `/download/requests/${tr.fileName || path.basename(tr.filePath)}`
+        });
+      }
+    } else {
+      console.error(`[DEBUG] Path does not exist: ${tr.filePath}`);
+      // Fallback to filename if available
+      if (tr.fileName && !tr.fileName.startsWith("Multiple Files")) {
+        files.push({ name: tr.fileName, url: `/download/requests/${tr.fileName}` });
+      }
+    }
+
+    console.log(`[DEBUG] Found ${files.length} files for request ${requestId}`);
+    res.json(files);
+  } catch (err) {
+    console.error("❌ getRequestFiles error:", err);
+    res.status(500).json({ error: "Internal server error reading files", details: err.message });
+  }
+}
+
 module.exports = {
   submitTopicRequest,
   getTopicRequests,
@@ -330,5 +403,6 @@ module.exports = {
   getGradeLevels,
   getSectionsByGradeLevel,
   getSubjectsBySection,
-  getGeneratedPDFs
+  getGeneratedPDFs,
+  getRequestFiles
 };

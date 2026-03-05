@@ -12,6 +12,12 @@ app.use(cors({ origin: "http://localhost:4200", credentials: true }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Logging middleware
+app.use((req, res, next) => {
+    console.log(`[DEBUG] Incoming Request: ${req.method} ${req.url}`);
+    next();
+});
+
 app.use(fileUpload({ createParentPath: true, limits: { fileSize: 20 * 1024 * 1024 }, useTempFiles: true, tempFileDir: path.join(__dirname, "tmp") }));
 app.use("/download", express.static(path.join(__dirname, "generated")));
 app.use("/download/requests", express.static(path.join(__dirname, "uploads", "requests")));
