@@ -19,20 +19,25 @@ async function submitTopicRequest(req, res, next) {
     if (!accountId || !gradeLevelId || !sectionId || !subjectId)
       return res.status(400).json({ error: "Account, Grade, Section, and Subject required" });
 
-    const uploadDir = path.join(__dirname, "../uploads", "requests");
+    const timestampDir = `${Date.now()}`;
+    const uploadDir = path.join(__dirname, "../uploads", "requests", timestampDir);
     if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
-    const fileName = `${Date.now()}_${pdfFile.name}`;
-    const filePath = path.join(uploadDir, fileName);
+    let filesArray = Array.isArray(req.files.file) ? req.files.file : [req.files.file];
 
-    // Move file to uploads/requests
-    await pdfFile.mv(filePath);
+    // Move all files to the timestamp directory
+    for (const file of filesArray) {
+      const filePath = path.join(uploadDir, file.name);
+      await file.mv(filePath);
+    }
 
-    // Save request to DB
+    // Save request to DB - store the directory path
+    const fileName = filesArray.length > 1 ? `Multiple Files (${filesArray.length})` : filesArray[0].name;
+
     const [result] = await pool.query(
       `INSERT INTO topicrequests (accountId, gradeLevelId, sectionId, subjectId, fileName, filePath, status, aiStatus, createdAt, updatedAt)
        VALUES (?, ?, ?, ?, ?, ?, 'Pending', 'Idle', NOW(), NOW())`,
-      [accountId, gradeLevelId, sectionId, subjectId, fileName, filePath]
+      [accountId, gradeLevelId, sectionId, subjectId, fileName, uploadDir]
     );
 
     res.json({
@@ -79,7 +84,43 @@ async function getTopicRequests(req, res, next) {
     query += " ORDER BY tr.createdAt DESC";
 
     const [rows] = await pool.query(query, params);
-    res.json(rows);
+
+    // Transform to add requestFileUrl
+    const formattedRows = rows.map(r => {
+      let requestFileUrl = null;
+      if (r.filePath && r.fileName && !r.fileName.startsWith("Multiple Files")) {
+        // Normalize slashes
+        const normalizedPath = r.filePath.replace(/\\/g, '/');
+        const token = 'uploads/requests';
+        const index = normalizedPath.toLowerCase().lastIndexOf(token);
+
+        if (index !== -1) {
+          let afterToken = normalizedPath.substring(index + token.length).replace(/^\/+/, '').replace(/\/+$/, '');
+
+          if (afterToken === "" || afterToken === r.fileName) {
+            // File is directly in requests/
+            requestFileUrl = `/download/requests/${r.fileName}`;
+          } else {
+            // In a subdirectory (timestamp)
+            // Ensure afterToken includes the filename if it's just the dir
+            if (!afterToken.toLowerCase().endsWith(r.fileName.toLowerCase())) {
+              afterToken += '/' + r.fileName;
+            }
+            requestFileUrl = `/download/requests/${afterToken}`;
+          }
+        } else {
+          // Absolute fallback
+          requestFileUrl = `/download/requests/${r.fileName}`;
+        }
+
+        console.log(`[DEBUG] id: ${r.id} | filePath: ${r.filePath} | computed: ${requestFileUrl}`);
+      }
+      return { ...r, requestFileUrl };
+    });
+
+    console.log(`[DEBUG] Returning ${formattedRows.length} requests with URL transformations.`);
+
+    res.json(formattedRows);
   } catch (err) {
     console.error("❌ getTopicRequests error:", err);
     next(err);
@@ -102,12 +143,27 @@ async function approveAndGenerate(req, res, next) {
     await pool.query("UPDATE topicrequests SET status = 'Approved', aiStatus = 'Processing', updatedAt = NOW() WHERE id = ?", [requestId]);
 
     // 3. Perform AI Generation
-    const buffer = fs.readFileSync(tr.filePath);
-    const text = await extractTextFromPDF(buffer);
+    let text = "";
+
+    // Check if filePath is a directory (new logic) or a file (old logic)
+    const stats = fs.statSync(tr.filePath);
+    if (stats.isDirectory()) {
+      const files = fs.readdirSync(tr.filePath);
+      for (const file of files) {
+        if (file.toLowerCase().endsWith('.pdf')) {
+          const buffer = fs.readFileSync(path.join(tr.filePath, file));
+          const extractedText = await extractTextFromPDF(buffer);
+          text += " " + extractedText;
+        }
+      }
+    } else {
+      const buffer = fs.readFileSync(tr.filePath);
+      text = await extractTextFromPDF(buffer);
+    }
 
     if (!text || text.trim().length === 0) {
       await pool.query("UPDATE topicrequests SET aiStatus = 'Failed', remarks = 'No readable text' WHERE id = ?", [requestId]);
-      return res.status(400).json({ error: "No readable text found in PDF" });
+      return res.status(400).json({ error: "No readable text found in PDF(s)" });
     }
 
     const questions = await generateQuestionsWithOpenRouter(text);
@@ -147,7 +203,8 @@ async function approveAndGenerate(req, res, next) {
     if (!fs.existsSync(subjectDir)) fs.mkdirSync(subjectDir, { recursive: true });
 
     const originalNameMatch = tr.fileName.match(/^\d+_(.+)$/);
-    const pdfFileName = originalNameMatch ? originalNameMatch[1] : tr.fileName;
+    const safeSubjectName = (tr.fileName || "Multiple_Files").replace(/[\/:*?"<>|]/g, "_");
+    const pdfFileName = originalNameMatch ? originalNameMatch[1] : (tr.fileName.startsWith("Multiple Files") ? `${Date.now()}_Questions.pdf` : tr.fileName);
 
     const pdfPathResult = path.join(subjectDir, pdfFileName);
     const pdfBytes = await pdfDoc.save();
